@@ -31,35 +31,57 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 logger.info('=== Модуль webhook.py загружен ===')
 
-BOT_TOKEN = os.getenv('BOT_TOKEN', '')
-UPSTASH_REDIS_URL = os.getenv('UPSTASH_REDIS_URL', '')
+# Ленивая инициализация — создаём bot и dp при первом запросе
+_bot = None
+_dp = None
 
-if not BOT_TOKEN:
-    raise RuntimeError('BOT_TOKEN не задан в переменных окружения Vercel')
 
-bot = Bot(
-    token=BOT_TOKEN,
-    default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN),
-)
-
-if UPSTASH_REDIS_URL:
-    from aiogram.fsm.storage.redis import RedisStorage
-    storage = RedisStorage.from_url(UPSTASH_REDIS_URL)
-    logger.info('FSM storage: Redis')
-else:
-    from aiogram.fsm.storage.memory import MemoryStorage
-    storage = MemoryStorage()
-    logger.warning('FSM storage: MemoryStorage (состояния не сохраняются между вызовами!)')
-
-dp = Dispatcher(storage=storage)
-
-from handlers import routers  # noqa: E402
-dp.include_routers(*routers)
+def _init_bot():
+    """Инициализирует bot и dispatcher при первом запросе."""
+    global _bot, _dp
+    if _bot is not None:
+        return _bot, _dp
+    
+    logger.info('Инициализация bot и dispatcher...')
+    
+    BOT_TOKEN = os.getenv('BOT_TOKEN', '')
+    UPSTASH_REDIS_URL = os.getenv('UPSTASH_REDIS_URL', '')
+    
+    if not BOT_TOKEN:
+        raise RuntimeError('BOT_TOKEN не задан в переменных окружения Vercel')
+    
+    _bot = Bot(
+        token=BOT_TOKEN,
+        default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN),
+    )
+    
+    try:
+        if UPSTASH_REDIS_URL:
+            from aiogram.fsm.storage.redis import RedisStorage
+            storage = RedisStorage.from_url(UPSTASH_REDIS_URL)
+            logger.info('FSM storage: Redis')
+        else:
+            from aiogram.fsm.storage.memory import MemoryStorage
+            storage = MemoryStorage()
+            logger.warning('FSM storage: MemoryStorage (состояния не сохраняются между вызовами!)')
+        
+        _dp = Dispatcher(storage=storage)
+        
+        from handlers import routers  # noqa: E402
+        _dp.include_routers(*routers)
+        
+        logger.info('Bot и dispatcher инициализированы успешно')
+    except Exception as e:
+        logger.exception('Ошибка при инициализации: %s', e)
+        raise
+    
+    return _bot, _dp
 
 
 async def _process_update(body: bytes) -> None:
     """Обрабатывает Update от Telegram."""
     try:
+        bot, dp = _init_bot()
         update_data = json.loads(body)
         update = Update.model_validate(update_data, context={'bot': bot})
         await dp.feed_update(bot, update)
@@ -112,13 +134,37 @@ class handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         """Health check endpoint."""
-        logger.info('=== GET запрос получен ===')
-        logger.info('Path: %s', self.path)
-        self.send_response(200)
-        self.send_header('Content-Type', 'application/json')
-        self.end_headers()
-        self.wfile.write(b'{"status": "ok", "message": "Bot webhook is active"}')
-        logger.info('GET ответ отправлен')
+        try:
+            logger.info('=== GET запрос получен ===')
+            logger.info('Path: %s', self.path)
+            logger.info('Headers: %s', dict(self.headers))
+            
+            # Пробуем инициализировать bot для проверки
+            try:
+                bot, dp = _init_bot()
+                bot_status = 'initialized'
+            except Exception as e:
+                bot_status = f'error: {str(e)[:100]}'
+                logger.exception('Ошибка при инициализации bot в GET: %s', e)
+            
+            response_data = {
+                'status': 'ok',
+                'message': 'Bot webhook is active',
+                'bot_status': bot_status,
+                'path': self.path
+            }
+            
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps(response_data).encode('utf-8'))
+            logger.info('GET ответ отправлен: %s', response_data)
+        except Exception as e:
+            logger.exception('Ошибка в do_GET: %s', e)
+            self.send_response(500)
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps({'error': str(e)[:200]}).encode('utf-8'))
 
     def log_message(self, format, *args):
         """Перенаправляет логи в logger вместо stderr."""
