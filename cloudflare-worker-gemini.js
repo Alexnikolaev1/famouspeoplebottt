@@ -1,0 +1,47 @@
+/**
+ * Cloudflare Worker — прокси для Gemini API (generativelanguage.googleapis.com)
+ * Обходит "User location is not supported" для регионов с ограничениями.
+ *
+ * ВАЖНО: Это НЕ тот же воркер, что для Telegram! Для Telegram используйте cloudflare-worker.js
+ *
+ * Деплой: Cloudflare Dashboard → Workers → Create → вставьте этот код
+ * В .env добавьте: GEMINI_WORKER_URL=https://ваш-gemini-воркер.workers.dev
+ */
+export default {
+  async fetch(request) {
+    const url = new URL(request.url);
+
+    if (url.pathname === '/' || url.pathname === '') {
+      return new Response(
+        JSON.stringify({ status: 'ok', message: 'Gemini API Proxy' }),
+        { headers: { 'Content-Type': 'application/json' } }
+      );
+    }
+
+    if (request.method === 'OPTIONS') {
+      return new Response(null, {
+        headers: {
+          'Access-Control-Allow-Origin': '*',
+          'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+          'Access-Control-Allow-Headers': '*',
+        },
+      });
+    }
+
+    const externalUrl = 'https://generativelanguage.googleapis.com';
+    const proxiedUrl = externalUrl + url.pathname + url.search;
+
+    try {
+      const proxiedRequest = new Request(proxiedUrl, request);
+      const response = await fetch(proxiedRequest);
+      const newResponse = new Response(response.body, response);
+      newResponse.headers.set('Access-Control-Allow-Origin', '*');
+      return newResponse;
+    } catch (error) {
+      return new Response(
+        JSON.stringify({ error: error.message }),
+        { status: 500, headers: { 'Content-Type': 'application/json' } }
+      );
+    }
+  },
+};
