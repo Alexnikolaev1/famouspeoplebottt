@@ -29,6 +29,7 @@ logging.basicConfig(
     format='%(asctime)s [%(name)s] %(levelname)s: %(message)s',
 )
 logger = logging.getLogger(__name__)
+logger.info('=== Модуль webhook.py загружен ===')
 
 BOT_TOKEN = os.getenv('BOT_TOKEN', '')
 UPSTASH_REDIS_URL = os.getenv('UPSTASH_REDIS_URL', '')
@@ -73,6 +74,9 @@ class handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         """Обрабатывает POST-запрос от Telegram."""
+        logger.info('=== POST запрос получен ===')
+        logger.info('Path: %s', self.path)
+        logger.info('Headers: %s', dict(self.headers))
         try:
             content_length = int(self.headers.get('Content-Length', 0))
             if content_length == 0:
@@ -108,10 +112,13 @@ class handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         """Health check endpoint."""
+        logger.info('=== GET запрос получен ===')
+        logger.info('Path: %s', self.path)
         self.send_response(200)
         self.send_header('Content-Type', 'application/json')
         self.end_headers()
         self.wfile.write(b'{"status": "ok", "message": "Bot webhook is active"}')
+        logger.info('GET ответ отправлен')
 
     def log_message(self, format, *args):
         """Перенаправляет логи в logger вместо stderr."""
