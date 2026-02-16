@@ -13,16 +13,7 @@ import logging
 import os
 import sys
 
-# Корень проекта — на один уровень выше api/
-_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, _PROJECT_ROOT)
-
 from http.server import BaseHTTPRequestHandler
-
-from aiogram import Bot, Dispatcher
-from aiogram.enums import ParseMode
-from aiogram.client.default import DefaultBotProperties
-from aiogram.types import Update
 
 logging.basicConfig(
     level=logging.INFO,
@@ -30,6 +21,10 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 logger.info('=== Модуль webhook.py загружен ===')
+
+# Корень проекта — на один уровень выше api/
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, _PROJECT_ROOT)
 
 # Ленивая инициализация — создаём bot и dp при первом запросе
 _bot = None
@@ -44,18 +39,23 @@ def _init_bot():
     
     logger.info('Инициализация bot и dispatcher...')
     
-    BOT_TOKEN = os.getenv('BOT_TOKEN', '')
-    UPSTASH_REDIS_URL = os.getenv('UPSTASH_REDIS_URL', '')
-    
-    if not BOT_TOKEN:
-        raise RuntimeError('BOT_TOKEN не задан в переменных окружения Vercel')
-    
-    _bot = Bot(
-        token=BOT_TOKEN,
-        default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN),
-    )
-    
     try:
+        from aiogram import Bot, Dispatcher
+        from aiogram.enums import ParseMode
+        from aiogram.client.default import DefaultBotProperties
+        from aiogram.types import Update
+        
+        BOT_TOKEN = os.getenv('BOT_TOKEN', '')
+        UPSTASH_REDIS_URL = os.getenv('UPSTASH_REDIS_URL', '')
+        
+        if not BOT_TOKEN:
+            raise RuntimeError('BOT_TOKEN не задан в переменных окружения Vercel')
+        
+        _bot = Bot(
+            token=BOT_TOKEN,
+            default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN),
+        )
+        
         if UPSTASH_REDIS_URL:
             from aiogram.fsm.storage.redis import RedisStorage
             storage = RedisStorage.from_url(UPSTASH_REDIS_URL)
@@ -82,6 +82,8 @@ async def _process_update(body: bytes) -> None:
     """Обрабатывает Update от Telegram."""
     try:
         bot, dp = _init_bot()
+        from aiogram.types import Update
+        
         update_data = json.loads(body)
         update = Update.model_validate(update_data, context={'bot': bot})
         await dp.feed_update(bot, update)
@@ -96,10 +98,10 @@ class handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         """Обрабатывает POST-запрос от Telegram."""
-        logger.info('=== POST запрос получен ===')
-        logger.info('Path: %s', self.path)
-        logger.info('Headers: %s', dict(self.headers))
         try:
+            logger.info('=== POST запрос получен ===')
+            logger.info('Path: %s', self.path)
+            
             content_length = int(self.headers.get('Content-Length', 0))
             if content_length == 0:
                 logger.warning('Пустое тело запроса')
@@ -130,14 +132,14 @@ class handler(BaseHTTPRequestHandler):
             self.send_response(500)
             self.send_header('Content-Type', 'application/json')
             self.end_headers()
-            self.wfile.write(json.dumps({'error': str(e)[:200]}).encode('utf-8'))
+            error_msg = json.dumps({'error': str(e)[:200]}).encode('utf-8')
+            self.wfile.write(error_msg)
 
     def do_GET(self):
         """Health check endpoint."""
         try:
             logger.info('=== GET запрос получен ===')
             logger.info('Path: %s', self.path)
-            logger.info('Headers: %s', dict(self.headers))
             
             # Пробуем инициализировать bot для проверки
             try:
@@ -164,7 +166,8 @@ class handler(BaseHTTPRequestHandler):
             self.send_response(500)
             self.send_header('Content-Type', 'application/json')
             self.end_headers()
-            self.wfile.write(json.dumps({'error': str(e)[:200]}).encode('utf-8'))
+            error_msg = json.dumps({'error': str(e)[:200]}).encode('utf-8')
+            self.wfile.write(error_msg)
 
     def log_message(self, format, *args):
         """Перенаправляет логи в logger вместо stderr."""
