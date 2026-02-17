@@ -1,29 +1,20 @@
 """
-Клиент для работы с Gemini API (REST).
-Используется прямой доступ к generativelanguage.googleapis.com (при наличии VPN)
-или Cloudflare Workers прокси (GEMINI_WORKER_URL в .env).
+LLM клиент для Famous People Bot.
+Использует Qwen 3.5 Plus через Alibaba DashScope (OpenAI-совместимый API).
 """
 
 import asyncio
-import json
 import logging
 import os
-import re
 
-import httpx
+from openai import AsyncOpenAI
 
 from .enums import MessageRole, Extensions, ResourcePath
 
 logger = logging.getLogger(__name__)
 
-
-def _normalize_base_url(url: str) -> str:
-    u = (url or "").strip().rstrip("/")
-    if not u:
-        return ""
-    if not re.match(r"^https?://", u, flags=re.IGNORECASE):
-        u = "https://" + u
-    return u
+QWEN_BASE_URL = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+QWEN_MODEL = "qwen3.5-plus"
 
 
 class GeminiMessage:
@@ -82,7 +73,7 @@ class GeminiMessage:
 
 
 class GeminiClient:
-    """Клиент для работы с Gemini 2.5 Flash (REST API напрямую или через прокси)."""
+    """Клиент для работы с Qwen 3.5 Plus (DashScope, OpenAI-совместимый API)."""
 
     _instance = None
 
@@ -94,79 +85,38 @@ class GeminiClient:
     def __init__(
         self,
         api_key: str | None = None,
-        worker_url: str | None = None,
-        model: str = 'gemini-2.5-flash',
+        model: str = QWEN_MODEL,
     ):
-        self.api_key = (api_key or os.getenv('GEMINI_API_KEY') or os.getenv('GOOGLE_API_KEY') or '').strip()
-        # Прямой доступ к Gemini API (работает при VPN из РФ).
-        # Если нужен прокси — задайте GEMINI_WORKER_URL в .env.
-        self.base_url = _normalize_base_url(
-            worker_url
-            or os.getenv('GEMINI_WORKER_URL')
-            or os.getenv('CLOUDFLARE_WORKER_URL')
-            or 'https://generativelanguage.googleapis.com'
-        )
+        self.api_key = (api_key or os.getenv('DASHSCOPE_API_KEY') or '').strip()
         self.model = model
+        self._client: AsyncOpenAI | None = None
 
-    def _build_payload(self, messages: GeminiMessage, max_tokens: int = 8192) -> dict:
-        """Преобразует GeminiMessage в формат REST API Gemini."""
-        system_instruction = None
-        contents = []
+    def _get_client(self) -> AsyncOpenAI:
+        """Ленивая инициализация клиента."""
+        if self._client is None:
+            self._client = AsyncOpenAI(
+                api_key=self.api_key,
+                base_url=QWEN_BASE_URL,
+            )
+        return self._client
 
+    def _to_openai_messages(self, messages: GeminiMessage) -> list[dict[str, str]]:
+        """Преобразует GeminiMessage в формат OpenAI chat (role + content)."""
+        result = []
         for msg in messages.message_list:
             role = msg['role']
             content = msg['content']
-
-            if role == MessageRole.SYSTEM.value:
-                system_instruction = content
-            elif role == MessageRole.USER.value:
-                contents.append({'role': 'user', 'parts': [{'text': content}]})
-            elif role == MessageRole.ASSISTANT.value:
-                contents.append({'role': 'model', 'parts': [{'text': content}]})
-
-        if not contents:
-            contents = [{'parts': [{'text': 'Выполни инструкцию.'}]}]
-
-        payload = {
-            'contents': contents,
-            'generationConfig': {
-                'maxOutputTokens': max_tokens,
-                'temperature': 0.7,
-                'topP': 0.95,
-            },
-            'safetySettings': [
-                {'category': 'HARM_CATEGORY_HARASSMENT', 'threshold': 'BLOCK_NONE'},
-                {'category': 'HARM_CATEGORY_HATE_SPEECH', 'threshold': 'BLOCK_NONE'},
-                {'category': 'HARM_CATEGORY_SEXUALLY_EXPLICIT', 'threshold': 'BLOCK_NONE'},
-                {'category': 'HARM_CATEGORY_DANGEROUS_CONTENT', 'threshold': 'BLOCK_NONE'},
-            ],
-        }
-
-        if system_instruction:
-            payload['systemInstruction'] = {'parts': [{'text': system_instruction}]}
-
-        return payload
+            # Qwen/OpenAI использует те же роли: system, user, assistant
+            result.append({'role': role, 'content': content})
+        if not result:
+            result = [{'role': 'user', 'content': 'Выполни инструкцию.'}]
+        return result
 
     async def request(self, messages: GeminiMessage, max_tokens: int = 8192) -> str:
-        """Отправляет запрос к Gemini API и возвращает текст ответа."""
+        """Отправляет запрос к Qwen API и возвращает текст ответа."""
         if not self.api_key:
-            logger.error('GEMINI_API_KEY не задан')
+            logger.error('DASHSCOPE_API_KEY не задан')
             return 'Извините, не настроен API ключ. Обратитесь к администратору.'
-
-        if not self.base_url:
-            logger.error('Gemini API URL не задан')
-            return 'Извините, не настроен URL Gemini API. Обратитесь к администратору.'
-
-        url = f"{self.base_url}/v1beta/models/{self.model}:generateContent"
-
-        logger.info('Gemini запрос: %s', url)
-
-        headers = {
-            'Content-Type': 'application/json',
-            'x-goog-api-key': self.api_key,
-        }
-
-        payload = self._build_payload(messages, max_tokens=max_tokens)
 
         retries = 3
         backoffs = [0.7, 1.5, 3.0]
@@ -174,68 +124,33 @@ class GeminiClient:
 
         for attempt in range(retries):
             try:
-                async with httpx.AsyncClient(timeout=60.0) as client:
-                    response = await client.post(url, json=payload, headers=headers)
+                client = self._get_client()
+                openai_messages = self._to_openai_messages(messages)
 
-                logger.debug(
-                    'Gemini API response: status=%s, length=%s',
-                    response.status_code,
-                    len(response.content),
+                logger.info('Qwen запрос: model=%s', self.model)
+
+                response = await client.chat.completions.create(
+                    model=self.model,
+                    messages=openai_messages,
+                    max_tokens=max_tokens,
+                    temperature=0.7,
+                    extra_body={"enable_thinking": True},
                 )
 
-                if response.status_code in {429, 500, 502, 503, 504}:
-                    if attempt < retries - 1:
-                        await asyncio.sleep(backoffs[attempt])
-                        continue
-                    raise httpx.HTTPStatusError(
-                        'retryable',
-                        request=response.request,
-                        response=response,
-                    )
-
-                response.raise_for_status()
-
-                response_text = response.content.decode('utf-8', errors='replace')
-                if not response_text or not response_text.strip():
-                    logger.error('Пустой ответ от Gemini API')
+                if not response.choices:
+                    logger.error('Пустой ответ от Qwen API')
                     return 'Извините, нейросеть вернула пустой ответ. Попробуйте позже.'
 
-                data = json.loads(response_text)
+                msg = response.choices[0].message
+                text = (msg.content or '').strip()
+                logger.info('Qwen ответ: %s символов', len(text))
+                return text or 'Извините, нейросеть не сформировала ответ. Попробуйте позже.'
 
-                if 'candidates' not in data or not data.get('candidates'):
-                    logger.error('Неожиданная структура ответа: %s', list(data.keys()))
-                    return 'Извините, неожиданный формат ответа от нейросети. Попробуйте позже.'
-
-                candidate = data['candidates'][0]
-                finish_reason = candidate.get('finishReason', '')
-
-                if finish_reason == 'MAX_TOKENS':
-                    logger.warning('Ответ обрезан: MAX_TOKENS')
-
-                if 'content' not in candidate or 'parts' not in candidate['content']:
-                    logger.error('Нет content/parts в candidate')
-                    return 'Извините, ошибка формата ответа. Попробуйте позже.'
-
-                parts = candidate['content']['parts']
-                if not parts or 'text' not in parts[0]:
-                    logger.error('Нет text в parts')
-                    return 'Извините, ошибка формата ответа. Попробуйте позже.'
-
-                text = parts[0]['text']
-                logger.info('Gemini ответ: %s символов', len(text))
-                return text or ''
-
-            except httpx.HTTPStatusError as e:
+            except Exception as e:
                 last_err = e
-                body = ''
-                try:
-                    body = (e.response.text or '')[:1000]
-                except Exception:
-                    pass
+                err_str = str(e).lower()
 
-                logger.warning('Gemini API ошибка: %s - %s', e.response.status_code, body[:200])
-
-                if e.response.status_code == 429:
+                if '429' in err_str or 'rate' in err_str:
                     if attempt < retries - 1:
                         await asyncio.sleep(60)
                         continue
@@ -244,27 +159,12 @@ class GeminiClient:
                         'А если запросов было много — сделайте попытку на следующий день.'
                     )
 
-                if 'User location is not supported' in body:
-                    return (
-                        'Доступ к Gemini API ограничен в вашем регионе. '
-                        'Настройте CLOUDFLARE_WORKER_URL (см. CLOUDFLARE_SETUP.md).'
-                    )
-
                 if attempt < retries - 1:
                     await asyncio.sleep(backoffs[attempt])
                     continue
 
-                return f'Ошибка Gemini API: {e.response.status_code}. Попробуйте позже.'
-
-            except json.JSONDecodeError as e:
-                last_err = e
-                logger.exception('Ошибка парсинга JSON от Gemini: %s', e)
-                return 'Извините, ошибка при обработке ответа нейросети. Попробуйте позже.'
-
-            except Exception as e:
-                last_err = e
-                logger.exception('Неожиданная ошибка Gemini: %s', e)
-                return 'Извините, произошла ошибка. Попробуйте позже.'
+                logger.exception('Ошибка Qwen API: %s', e)
+                return f'Ошибка Qwen API. Попробуйте позже.'
 
         return 'Извините, технические неполадки. Попробуйте позже.' if last_err else ''
 

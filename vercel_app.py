@@ -85,6 +85,7 @@ async def telegram_webhook_get():
 @app.post("/api/webhook")
 async def telegram_webhook(request: Request):
     """Обработчик вебхуков от Telegram"""
+    logger.info("=== POST /api/webhook received ===")
     try:
         # Читаем JSON напрямую
         update = await request.json()

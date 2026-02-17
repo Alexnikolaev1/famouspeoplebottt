@@ -22,14 +22,14 @@ import misc
 from handlers import routers
 
 BOT_TOKEN = os.getenv('BOT_TOKEN')
-GEMINI_API_KEY = os.getenv('GEMINI_API_KEY') or os.getenv('GOOGLE_API_KEY')
+DASHSCOPE_API_KEY = os.getenv('DASHSCOPE_API_KEY')
 PROXY = os.getenv('PROXY') or os.getenv('HTTP_PROXY') or os.getenv('HTTPS_PROXY')
 TELEGRAM_API_URL = os.getenv('TELEGRAM_API_URL')
 
 if not BOT_TOKEN:
     raise SystemExit('Ошибка: не задан BOT_TOKEN в переменных окружения (.env)')
-if not GEMINI_API_KEY:
-    raise SystemExit('Ошибка: не задан GEMINI_API_KEY или GOOGLE_API_KEY в переменных окружения (.env)')
+if not DASHSCOPE_API_KEY:
+    raise SystemExit('Ошибка: не задан DASHSCOPE_API_KEY в переменных окружения (.env)')
 
 bot_kwargs = dict(
     token=BOT_TOKEN,
