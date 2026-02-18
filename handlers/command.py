@@ -6,6 +6,7 @@ from aiogram.fsm.context import FSMContext
 from classes import gemini_client
 from classes.resource import Resource
 from classes.gemini_client import GeminiMessage
+from classes.enums import MessageRole
 from .handlers_state import GeminiRequests
 from misc import bot_thinking
 
@@ -61,6 +62,7 @@ async def com_fact(message: Message):
     await bot_thinking(message)
     resource = Resource('random')
     gemini_message = GeminiMessage('random')
+    gemini_message.update(MessageRole.USER, 'Расскажи один интересный православный факт.')
     msg_text = await gemini_client.request(gemini_message)
     await _send_resource(message, resource, caption=msg_text, reply_markup=kb_fact())
 
