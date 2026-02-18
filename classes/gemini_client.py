@@ -48,7 +48,9 @@ class GeminiMessage:
         with open(prompt_path, 'r', encoding='UTF-8') as file:
             prompt = file.read()
 
-        prompt = self._append_orthodox_filter(prompt)
+        # random, quiz — без orthodox_filter (YandexGPT блокирует религиозную лексику)
+        if self.prompt_file not in ('random.txt', 'quiz.txt'):
+            prompt = self._append_orthodox_filter(prompt)
         return prompt
 
     def _append_orthodox_filter(self, base_prompt: str) -> str:
