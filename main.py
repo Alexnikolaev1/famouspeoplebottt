@@ -22,14 +22,17 @@ import misc
 from handlers import routers
 
 BOT_TOKEN = os.getenv('BOT_TOKEN')
-SCITELY_API_KEY = os.getenv('SCITELY_API_KEY')
+YANDEX_CFG = os.getenv('YANDEX_FOLDER_ID') and os.getenv('YANDEX_API_KEY')
+GEMINI_KEYS = os.getenv('GEMINI_API_KEYS', '').strip() or os.getenv('GEMINI_API_KEY') or os.getenv('GOOGLE_API_KEY') or ''
 PROXY = os.getenv('PROXY') or os.getenv('HTTP_PROXY') or os.getenv('HTTPS_PROXY')
 TELEGRAM_API_URL = os.getenv('TELEGRAM_API_URL')
 
 if not BOT_TOKEN:
     raise SystemExit('Ошибка: не задан BOT_TOKEN в переменных окружения (.env)')
-if not SCITELY_API_KEY:
-    raise SystemExit('Ошибка: не задан SCITELY_API_KEY в переменных окружения (.env)')
+if not YANDEX_CFG and not GEMINI_KEYS:
+    raise SystemExit(
+        'Ошибка: задайте YANDEX_FOLDER_ID + YANDEX_API_KEY или GEMINI_API_KEY в переменных окружения (.env)'
+    )
 
 bot_kwargs = dict(
     token=BOT_TOKEN,

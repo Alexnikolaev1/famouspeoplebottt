@@ -1,22 +1,30 @@
 """
 LLM клиент для Famous People Bot.
-Использует Scitely API — бесплатно, без карты, 60 запросов/мин, 15+ моделей.
-Документация: https://platform.scitely.com/docs
+Использует Google Gemini API (generativelanguage.googleapis.com).
+Бесплатный тариф: 250K TPM, 1000 запросов/день. Без карты.
+Документация: https://ai.google.dev/gemini-api/docs
 """
 
+import asyncio
+import json
 import logging
 import os
+import re
 
-from openai import AsyncOpenAI
+import httpx
 
 from .enums import MessageRole, Extensions, ResourcePath
 
 logger = logging.getLogger(__name__)
 
-# https://platform.scitely.com/docs — Community tier бесплатно
-SCITELY_BASE_URL = "https://api.scitely.com/v1"
-SCITELY_MODEL = "deepseek-v3.2"
-SCITELY_FALLBACK_MODELS = ["qwen3-max", "qwen3-32b", "deepseek-r1", "kimi-k2-0905"]
+
+def _normalize_base_url(url: str) -> str:
+    u = (url or "").strip().rstrip("/")
+    if not u:
+        return ""
+    if not re.match(r"^https?://", u, flags=re.IGNORECASE):
+        u = "https://" + u
+    return u
 
 
 class GeminiMessage:
@@ -75,7 +83,7 @@ class GeminiMessage:
 
 
 class GeminiClient:
-    """Клиент для работы с Scitely API (бесплатный Community tier)."""
+    """Клиент для работы с Gemini API (REST)."""
 
     _instance = None
 
@@ -84,69 +92,209 @@ class GeminiClient:
             cls._instance = super().__new__(cls)
         return cls._instance
 
-    def __init__(self, api_key: str | None = None):
-        self.api_key = (api_key or os.getenv('SCITELY_API_KEY') or '').strip()
-        self.model = os.getenv('SCITELY_MODEL') or SCITELY_MODEL
-        self.models = [self.model] + [
-            m for m in SCITELY_FALLBACK_MODELS if m != self.model
-        ]
-        self.base_url = (
-            os.getenv('SCITELY_BASE_URL') or SCITELY_BASE_URL
-        ).strip().rstrip('/')
-        self._client: AsyncOpenAI | None = None
+    def __init__(
+        self,
+        api_key: str | None = None,
+        worker_url: str | None = None,
+        model: str = 'gemini-2.0-flash',
+    ):
+        # Поддержка нескольких ключей: GEMINI_API_KEYS или GEMINI_API_KEY (через запятую)
+        keys_str = (
+            os.getenv('GEMINI_API_KEYS', '').strip()
+            or (api_key or os.getenv('GEMINI_API_KEY') or os.getenv('GOOGLE_API_KEY') or '').strip()
+        )
+        self.api_keys = [k.strip() for k in keys_str.split(',') if k.strip()]
+        self.api_key = self.api_keys[0] if self.api_keys else ''
+        self.base_url = _normalize_base_url(
+            worker_url
+            or os.getenv('GEMINI_WORKER_URL')
+            or os.getenv('CLOUDFLARE_WORKER_URL')
+            or 'https://generativelanguage.googleapis.com'
+        )
+        self.model = (model or os.getenv('GEMINI_MODEL') or 'gemini-2.0-flash').strip()
 
-    def _get_client(self) -> AsyncOpenAI:
-        if self._client is None:
-            self._client = AsyncOpenAI(
-                api_key=self.api_key,
-                base_url=self.base_url,
-            )
-        return self._client
+    # Сколько пар user+assistant оставлять в контексте (экономия токенов)
+    MAX_HISTORY_PAIRS = int(os.getenv('GEMINI_MAX_HISTORY_PAIRS', '3'))
 
-    def _to_openai_messages(self, messages: GeminiMessage) -> list[dict[str, str]]:
-        result = []
-        for msg in messages.message_list:
-            result.append({'role': msg['role'], 'content': msg['content']})
-        return result or [{'role': 'user', 'content': 'Выполни инструкцию.'}]
+    def _build_payload(self, messages: GeminiMessage, max_tokens: int = 2048) -> dict:
+        """Преобразует GeminiMessage в формат REST API Gemini."""
+        system_instruction = None
+        contents = []
 
-    async def request(self, messages: GeminiMessage, max_tokens: int = 8192) -> str:
-        """Отправляет запрос к Scitely API и возвращает текст ответа."""
-        if not self.api_key:
-            logger.error('SCITELY_API_KEY не задан')
+        # Ограничиваем историю — оставляем system + последние N пар (экономия токенов)
+        msg_list = messages.message_list
+        dialogue = []
+        for msg in msg_list:
+            role = msg['role']
+            content = msg['content']
+            if role == MessageRole.SYSTEM.value:
+                system_instruction = content
+            else:
+                dialogue.append(msg)
+
+        # Берём только последние N пар user+assistant
+        keep = self.MAX_HISTORY_PAIRS * 2
+        if len(dialogue) > keep:
+            dialogue = dialogue[-keep:]
+        for msg in dialogue:
+            role = msg['role']
+            content = msg['content']
+            if role == MessageRole.USER.value:
+                contents.append({'role': 'user', 'parts': [{'text': content}]})
+            elif role == MessageRole.ASSISTANT.value:
+                contents.append({'role': 'model', 'parts': [{'text': content}]})
+
+        if not contents:
+            contents = [{'parts': [{'text': 'Выполни инструкцию.'}]}]
+
+        payload = {
+            'contents': contents,
+            'generationConfig': {
+                'maxOutputTokens': max_tokens,
+                'temperature': 0.7,
+                'topP': 0.95,
+            },
+            'safetySettings': [
+                {'category': 'HARM_CATEGORY_HARASSMENT', 'threshold': 'BLOCK_NONE'},
+                {'category': 'HARM_CATEGORY_HATE_SPEECH', 'threshold': 'BLOCK_NONE'},
+                {'category': 'HARM_CATEGORY_SEXUALLY_EXPLICIT', 'threshold': 'BLOCK_NONE'},
+                {'category': 'HARM_CATEGORY_DANGEROUS_CONTENT', 'threshold': 'BLOCK_NONE'},
+            ],
+        }
+
+        if system_instruction:
+            payload['systemInstruction'] = {'parts': [{'text': system_instruction}]}
+
+        return payload
+
+    async def request(self, messages: GeminiMessage, max_tokens: int = 2048) -> str:
+        """Отправляет запрос к Gemini API и возвращает текст ответа."""
+        if not self.api_keys:
+            logger.error('GEMINI_API_KEY / GEMINI_API_KEYS не задан')
             return 'Извините, не настроен API ключ. Обратитесь к администратору.'
 
-        client = self._get_client()
-        openai_messages = self._to_openai_messages(messages)
+        if not self.base_url:
+            logger.error('Gemini API URL не задан')
+            return 'Извините, не настроен URL Gemini API. Обратитесь к администратору.'
 
-        for model in self.models:
-            try:
-                logger.info('Scitely запрос: model=%s', model)
-                response = await client.chat.completions.create(
-                    model=model,
-                    messages=openai_messages,
-                    max_tokens=min(max_tokens, 8192),
-                    temperature=0.7,
-                )
-                if not response.choices:
-                    return 'Извините, нейросеть вернула пустой ответ. Попробуйте позже.'
-                text = (response.choices[0].message.content or '').strip()
-                logger.info('Scitely ответ: %s символов', len(text))
-                return text or 'Извините, нейросеть не сформировала ответ. Попробуйте позже.'
+        url = f"{self.base_url}/v1beta/models/{self.model}:generateContent"
+        payload = self._build_payload(messages, max_tokens=max_tokens)
+        retries = 3
+        backoffs = [0.7, 1.5, 3.0]
+        last_err: Exception | None = None
 
-            except Exception as e:
-                err_str = str(e).lower()
-                logger.warning('Scitely (model=%s): %s', model, e)
-                if '429' in err_str or 'rate' in err_str:
-                    continue
-                if '401' in err_str or 'unauthorized' in err_str:
-                    return (
-                        'Ошибка авторизации Scitely (401). Проверьте SCITELY_API_KEY: '
-                        'получить ключ: https://console.scitely.com'
+        # Round-robin: распределяем запросы по ключам
+        keys_to_try = self.api_keys
+        if len(self.api_keys) > 1:
+            idx = getattr(GeminiClient, '_rr_idx', 0) % len(self.api_keys)
+            GeminiClient._rr_idx = idx + 1
+            keys_to_try = self.api_keys[idx:] + self.api_keys[:idx]
+
+        # Пробуем каждый ключ (при 429 — следующий)
+        for key_idx, api_key in enumerate(keys_to_try):
+            headers = {
+                'Content-Type': 'application/json',
+                'x-goog-api-key': api_key,
+            }
+            key_label = f'ключ {key_idx + 1}/{len(keys_to_try)}' if len(keys_to_try) > 1 else 'ключ'
+
+            for attempt in range(retries):
+                try:
+                    logger.info('Gemini запрос: %s (%s)', url, key_label)
+                    async with httpx.AsyncClient(timeout=60.0) as client:
+                        response = await client.post(url, json=payload, headers=headers)
+
+                    logger.debug(
+                        'Gemini API response: status=%s, length=%s',
+                        response.status_code,
+                        len(response.content),
                     )
-                return f'Ошибка Scitely API: {str(e)[:200]}. Попробуйте позже.'
 
-        return 'Все модели временно перегружены. Попробуйте через пару минут.'
+                    if response.status_code == 429:
+                        logger.warning('429 rate limit на %s', key_label)
+                        break  # переходим к следующему ключу
+
+                    if response.status_code in {500, 502, 503, 504}:
+                        if attempt < retries - 1:
+                            await asyncio.sleep(backoffs[attempt])
+                            continue
+                        raise httpx.HTTPStatusError(
+                            'retryable',
+                            request=response.request,
+                            response=response,
+                        )
+
+                    response.raise_for_status()
+
+                    response_text = response.content.decode('utf-8', errors='replace')
+                    if not response_text or not response_text.strip():
+                        logger.error('Пустой ответ от Gemini API')
+                        return 'Извините, нейросеть вернула пустой ответ. Попробуйте позже.'
+
+                    data = json.loads(response_text)
+
+                    if 'candidates' not in data or not data.get('candidates'):
+                        logger.error('Неожиданная структура ответа: %s', list(data.keys()))
+                        return 'Извините, неожиданный формат ответа от нейросети. Попробуйте позже.'
+
+                    candidate = data['candidates'][0]
+                    finish_reason = candidate.get('finishReason', '')
+
+                    if finish_reason == 'MAX_TOKENS':
+                        logger.warning('Ответ обрезан: MAX_TOKENS')
+
+                    if 'content' not in candidate or 'parts' not in candidate['content']:
+                        logger.error('Нет content/parts в candidate')
+                        return 'Извините, ошибка формата ответа. Попробуйте позже.'
+
+                    parts = candidate['content']['parts']
+                    if not parts or 'text' not in parts[0]:
+                        logger.error('Нет text в parts')
+                        return 'Извините, ошибка формата ответа. Попробуйте позже.'
+
+                    text = parts[0]['text']
+                    logger.info('Gemini ответ: %s символов', len(text))
+                    return text or ''
+
+                except httpx.HTTPStatusError as e:
+                    last_err = e
+                    body = ''
+                    try:
+                        body = (e.response.text or '')[:1000]
+                    except Exception:
+                        pass
+
+                    logger.warning('Gemini API ошибка: %s - %s', e.response.status_code, body[:200])
+
+                    if e.response.status_code == 429:
+                        break  # следующий ключ
+
+                    if 'User location is not supported' in body:
+                        return (
+                            'Доступ к Gemini API ограничен в вашем регионе. '
+                            'Настройте GEMINI_WORKER_URL (см. CLOUDFLARE_SETUP.md).'
+                        )
+
+                    if attempt < retries - 1:
+                        await asyncio.sleep(backoffs[attempt])
+                        continue
+
+                    return f'Ошибка Gemini API: {e.response.status_code}. Попробуйте позже.'
+
+                except json.JSONDecodeError as e:
+                    last_err = e
+                    logger.exception('Ошибка парсинга JSON от Gemini: %s', e)
+                    return 'Извините, ошибка при обработке ответа нейросети. Попробуйте позже.'
+
+                except Exception as e:
+                    last_err = e
+                    logger.exception('Неожиданная ошибка Gemini: %s', e)
+                    return 'Извините, произошла ошибка. Попробуйте позже.'
+
+        return (
+            'Попробуйте подождать пару минут. '
+            'А если запросов было много — сделайте попытку на следующий день.'
+        )
 
 
-# Синглтон, инициализируется при первом импорте
 gemini_client = GeminiClient()
