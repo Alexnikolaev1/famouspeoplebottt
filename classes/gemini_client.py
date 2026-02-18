@@ -13,8 +13,10 @@ from .enums import MessageRole, Extensions, ResourcePath
 
 logger = logging.getLogger(__name__)
 
-QWEN_BASE_URL = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
-QWEN_MODEL = "qwen3.5-plus"
+# Регионы: Singapore (intl), US Virginia (us), China Beijing (без -intl/-us)
+QWEN_BASE_URL_DEFAULT = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+# qwen-plus входит в free trial; qwen3.5-plus требует отдельной активации (AccessDenied.Unpurchased)
+QWEN_MODEL = "qwen-plus"
 
 
 class GeminiMessage:
@@ -88,7 +90,10 @@ class GeminiClient:
         model: str = QWEN_MODEL,
     ):
         self.api_key = (api_key or os.getenv('DASHSCOPE_API_KEY') or '').strip()
-        self.model = model
+        self.model = os.getenv('DASHSCOPE_MODEL') or model
+        self.base_url = (
+            os.getenv('DASHSCOPE_BASE_URL') or QWEN_BASE_URL_DEFAULT
+        ).strip().rstrip('/')
         self._client: AsyncOpenAI | None = None
 
     def _get_client(self) -> AsyncOpenAI:
@@ -96,7 +101,7 @@ class GeminiClient:
         if self._client is None:
             self._client = AsyncOpenAI(
                 api_key=self.api_key,
-                base_url=QWEN_BASE_URL,
+                base_url=self.base_url,
             )
         return self._client
 
@@ -127,14 +132,18 @@ class GeminiClient:
                 client = self._get_client()
                 openai_messages = self._to_openai_messages(messages)
 
-                logger.info('Qwen запрос: model=%s', self.model)
+                logger.info('Qwen запрос: model=%s, base=%s', self.model, self.base_url)
+
+                extra = {}
+                if os.getenv('DASHSCOPE_ENABLE_THINKING', '0').lower() in ('1', 'true', 'yes'):
+                    extra["enable_thinking"] = True
 
                 response = await client.chat.completions.create(
                     model=self.model,
                     messages=openai_messages,
                     max_tokens=max_tokens,
                     temperature=0.7,
-                    extra_body={"enable_thinking": True},
+                    **({"extra_body": extra} if extra else {}),
                 )
 
                 if not response.choices:
@@ -149,6 +158,8 @@ class GeminiClient:
             except Exception as e:
                 last_err = e
                 err_str = str(e).lower()
+                # Детальное логирование для отладки
+                logger.warning('Qwen API exception: %s', e, exc_info=True)
 
                 if '429' in err_str or 'rate' in err_str:
                     if attempt < retries - 1:
@@ -159,12 +170,28 @@ class GeminiClient:
                         'А если запросов было много — сделайте попытку на следующий день.'
                     )
 
+                # 401 — неверный ключ или ключ из другого региона
+                if '401' in err_str or 'unauthorized' in err_str or 'invalid' in err_str and 'key' in err_str:
+                    return (
+                        'Ошибка авторизации Qwen API (401). Проверьте DASHSCOPE_API_KEY: '
+                        'ключ должен быть из Model Studio в том же регионе, что и base_url. '
+                        'Singapore: modelstudio.console.alibabacloud.com → API Key.'
+                    )
+
+                # 403 — доступ запрещён (модель, квота, регион)
+                if '403' in err_str or 'forbidden' in err_str:
+                    return (
+                        'Доступ к Qwen API запрещён (403). Возможно: ключ из другого региона, '
+                        'free trial не активирован, или модель недоступна. '
+                        'Проверьте Model Studio → API Key (Singapore для free trial).'
+                    )
+
                 if attempt < retries - 1:
                     await asyncio.sleep(backoffs[attempt])
                     continue
 
                 logger.exception('Ошибка Qwen API: %s', e)
-                return f'Ошибка Qwen API. Попробуйте позже.'
+                return f'Ошибка Qwen API: {str(e)[:200]}. Проверьте DASHSCOPE_API_KEY и регион.'
 
         return 'Извините, технические неполадки. Попробуйте позже.' if last_err else ''
 
