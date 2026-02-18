@@ -34,7 +34,7 @@ class YandexClient:
         self.api_key = (os.getenv("YANDEX_API_KEY") or "").strip()
         self.model = (os.getenv("YANDEX_MODEL") or "yandexgpt-lite").strip()
 
-    def _build_payload(self, messages: GeminiMessage, max_tokens: int = 2048) -> dict:
+    def _build_payload(self, messages: GeminiMessage, max_tokens: int = 4096) -> dict:
         """Преобразует GeminiMessage в формат YandexGPT API."""
         model_uri = f"gpt://{self.folder_id}/{self.model}"
 
@@ -77,17 +77,18 @@ class YandexClient:
             "messages": yandex_messages,
         }
 
-    async def request(self, messages: GeminiMessage, max_tokens: int = 2048) -> str:
+    async def request(self, messages: GeminiMessage, max_tokens: int = 4096) -> str:
         """Отправляет запрос к YandexGPT API и возвращает текст ответа."""
         if not self.folder_id or not self.api_key:
             logger.error("YANDEX_FOLDER_ID или YANDEX_API_KEY не заданы")
             return "Извините, не настроен Yandex Cloud AI. Обратитесь к администратору."
 
+        max_tok = int(os.getenv("GEMINI_MAX_OUTPUT_TOKENS", str(max_tokens)))
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Api-Key {self.api_key}",
         }
-        payload = self._build_payload(messages, max_tokens=max_tokens)
+        payload = self._build_payload(messages, max_tokens=max_tok)
 
         try:
             logger.info("YandexGPT запрос: %s", self.model)

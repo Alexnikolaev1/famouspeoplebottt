@@ -116,7 +116,7 @@ class GeminiClient:
     # Сколько пар user+assistant оставлять в контексте (экономия токенов)
     MAX_HISTORY_PAIRS = int(os.getenv('GEMINI_MAX_HISTORY_PAIRS', '3'))
 
-    def _build_payload(self, messages: GeminiMessage, max_tokens: int = 2048) -> dict:
+    def _build_payload(self, messages: GeminiMessage, max_tokens: int = 4096) -> dict:
         """Преобразует GeminiMessage в формат REST API Gemini."""
         system_instruction = None
         contents = []
@@ -167,7 +167,7 @@ class GeminiClient:
 
         return payload
 
-    async def request(self, messages: GeminiMessage, max_tokens: int = 2048) -> str:
+    async def request(self, messages: GeminiMessage, max_tokens: int = 4096) -> str:
         """Отправляет запрос к Gemini API и возвращает текст ответа."""
         if not self.api_keys:
             logger.error('GEMINI_API_KEY / GEMINI_API_KEYS не задан')
@@ -178,7 +178,8 @@ class GeminiClient:
             return 'Извините, не настроен URL Gemini API. Обратитесь к администратору.'
 
         url = f"{self.base_url}/v1beta/models/{self.model}:generateContent"
-        payload = self._build_payload(messages, max_tokens=max_tokens)
+        max_tok = int(os.getenv('GEMINI_MAX_OUTPUT_TOKENS', str(max_tokens)))
+        payload = self._build_payload(messages, max_tokens=max_tok)
         retries = 3
         backoffs = [0.7, 1.5, 3.0]
         last_err: Exception | None = None
