@@ -21,7 +21,6 @@ def ikb_celebrity():
 
 # (emoji, отображаемое название, topic_id для промпта, short_key для callback_data ≤64 байт)
 QUIZ_TOPICS = [
-    ('📜', 'Догматическое богословие', 'quiz_dogmatic', 'dogmatic'),
     ('📖', 'Священное Предание и Писание', 'quiz_tradition', 'tradition'),
     ('⚖️', 'Каноническое право', 'quiz_canon', 'canon'),
     ('🕯', 'Богослужение и Таинства', 'quiz_liturgy', 'liturgy'),
