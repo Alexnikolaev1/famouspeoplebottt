@@ -1,9 +1,9 @@
 """
 LLM клиент для Famous People Bot.
-Использует Qwen 3.5 Plus через Alibaba DashScope (OpenAI-совместимый API).
+Использует Scitely API — бесплатно, без карты, 60 запросов/мин, 15+ моделей.
+Документация: https://platform.scitely.com/docs
 """
 
-import asyncio
 import logging
 import os
 
@@ -13,10 +13,10 @@ from .enums import MessageRole, Extensions, ResourcePath
 
 logger = logging.getLogger(__name__)
 
-# Регионы: Singapore (intl), US Virginia (us), China Beijing (без -intl/-us)
-QWEN_BASE_URL_DEFAULT = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
-# qwen-plus входит в free trial; qwen3.5-plus требует отдельной активации (AccessDenied.Unpurchased)
-QWEN_MODEL = "qwen-plus"
+# https://platform.scitely.com/docs — Community tier бесплатно
+SCITELY_BASE_URL = "https://api.scitely.com/v1"
+SCITELY_MODEL = "deepseek-v3.2"
+SCITELY_FALLBACK_MODELS = ["qwen3-max", "qwen3-32b", "deepseek-r1", "kimi-k2-0905"]
 
 
 class GeminiMessage:
@@ -75,7 +75,7 @@ class GeminiMessage:
 
 
 class GeminiClient:
-    """Клиент для работы с Qwen 3.5 Plus (DashScope, OpenAI-совместимый API)."""
+    """Клиент для работы с Scitely API (бесплатный Community tier)."""
 
     _instance = None
 
@@ -84,20 +84,18 @@ class GeminiClient:
             cls._instance = super().__new__(cls)
         return cls._instance
 
-    def __init__(
-        self,
-        api_key: str | None = None,
-        model: str = QWEN_MODEL,
-    ):
-        self.api_key = (api_key or os.getenv('DASHSCOPE_API_KEY') or '').strip()
-        self.model = os.getenv('DASHSCOPE_MODEL') or model
+    def __init__(self, api_key: str | None = None):
+        self.api_key = (api_key or os.getenv('SCITELY_API_KEY') or '').strip()
+        self.model = os.getenv('SCITELY_MODEL') or SCITELY_MODEL
+        self.models = [self.model] + [
+            m for m in SCITELY_FALLBACK_MODELS if m != self.model
+        ]
         self.base_url = (
-            os.getenv('DASHSCOPE_BASE_URL') or QWEN_BASE_URL_DEFAULT
+            os.getenv('SCITELY_BASE_URL') or SCITELY_BASE_URL
         ).strip().rstrip('/')
         self._client: AsyncOpenAI | None = None
 
     def _get_client(self) -> AsyncOpenAI:
-        """Ленивая инициализация клиента."""
         if self._client is None:
             self._client = AsyncOpenAI(
                 api_key=self.api_key,
@@ -106,94 +104,48 @@ class GeminiClient:
         return self._client
 
     def _to_openai_messages(self, messages: GeminiMessage) -> list[dict[str, str]]:
-        """Преобразует GeminiMessage в формат OpenAI chat (role + content)."""
         result = []
         for msg in messages.message_list:
-            role = msg['role']
-            content = msg['content']
-            # Qwen/OpenAI использует те же роли: system, user, assistant
-            result.append({'role': role, 'content': content})
-        if not result:
-            result = [{'role': 'user', 'content': 'Выполни инструкцию.'}]
-        return result
+            result.append({'role': msg['role'], 'content': msg['content']})
+        return result or [{'role': 'user', 'content': 'Выполни инструкцию.'}]
 
     async def request(self, messages: GeminiMessage, max_tokens: int = 8192) -> str:
-        """Отправляет запрос к Qwen API и возвращает текст ответа."""
+        """Отправляет запрос к Scitely API и возвращает текст ответа."""
         if not self.api_key:
-            logger.error('DASHSCOPE_API_KEY не задан')
+            logger.error('SCITELY_API_KEY не задан')
             return 'Извините, не настроен API ключ. Обратитесь к администратору.'
 
-        retries = 3
-        backoffs = [0.7, 1.5, 3.0]
-        last_err: Exception | None = None
+        client = self._get_client()
+        openai_messages = self._to_openai_messages(messages)
 
-        for attempt in range(retries):
+        for model in self.models:
             try:
-                client = self._get_client()
-                openai_messages = self._to_openai_messages(messages)
-
-                logger.info('Qwen запрос: model=%s, base=%s', self.model, self.base_url)
-
-                extra = {}
-                if os.getenv('DASHSCOPE_ENABLE_THINKING', '0').lower() in ('1', 'true', 'yes'):
-                    extra["enable_thinking"] = True
-
+                logger.info('Scitely запрос: model=%s', model)
                 response = await client.chat.completions.create(
-                    model=self.model,
+                    model=model,
                     messages=openai_messages,
-                    max_tokens=max_tokens,
+                    max_tokens=min(max_tokens, 8192),
                     temperature=0.7,
-                    **({"extra_body": extra} if extra else {}),
                 )
-
                 if not response.choices:
-                    logger.error('Пустой ответ от Qwen API')
                     return 'Извините, нейросеть вернула пустой ответ. Попробуйте позже.'
-
-                msg = response.choices[0].message
-                text = (msg.content or '').strip()
-                logger.info('Qwen ответ: %s символов', len(text))
+                text = (response.choices[0].message.content or '').strip()
+                logger.info('Scitely ответ: %s символов', len(text))
                 return text or 'Извините, нейросеть не сформировала ответ. Попробуйте позже.'
 
             except Exception as e:
-                last_err = e
                 err_str = str(e).lower()
-                # Детальное логирование для отладки
-                logger.warning('Qwen API exception: %s', e, exc_info=True)
-
+                logger.warning('Scitely (model=%s): %s', model, e)
                 if '429' in err_str or 'rate' in err_str:
-                    if attempt < retries - 1:
-                        await asyncio.sleep(60)
-                        continue
-                    return (
-                        'Попробуйте подождать пару минут. '
-                        'А если запросов было много — сделайте попытку на следующий день.'
-                    )
-
-                # 401 — неверный ключ или ключ из другого региона
-                if '401' in err_str or 'unauthorized' in err_str or 'invalid' in err_str and 'key' in err_str:
-                    return (
-                        'Ошибка авторизации Qwen API (401). Проверьте DASHSCOPE_API_KEY: '
-                        'ключ должен быть из Model Studio в том же регионе, что и base_url. '
-                        'Singapore: modelstudio.console.alibabacloud.com → API Key.'
-                    )
-
-                # 403 — доступ запрещён (модель, квота, регион)
-                if '403' in err_str or 'forbidden' in err_str:
-                    return (
-                        'Доступ к Qwen API запрещён (403). Возможно: ключ из другого региона, '
-                        'free trial не активирован, или модель недоступна. '
-                        'Проверьте Model Studio → API Key (Singapore для free trial).'
-                    )
-
-                if attempt < retries - 1:
-                    await asyncio.sleep(backoffs[attempt])
                     continue
+                if '401' in err_str or 'unauthorized' in err_str:
+                    return (
+                        'Ошибка авторизации Scitely (401). Проверьте SCITELY_API_KEY: '
+                        'получить ключ: https://console.scitely.com'
+                    )
+                return f'Ошибка Scitely API: {str(e)[:200]}. Попробуйте позже.'
 
-                logger.exception('Ошибка Qwen API: %s', e)
-                return f'Ошибка Qwen API: {str(e)[:200]}. Проверьте DASHSCOPE_API_KEY и регион.'
-
-        return 'Извините, технические неполадки. Попробуйте позже.' if last_err else ''
+        return 'Все модели временно перегружены. Попробуйте через пару минут.'
 
 
 # Синглтон, инициализируется при первом импорте
